@@ -1,0 +1,74 @@
+WITH
+raw1 AS (
+	SELECT
+        transit_time_report.order_id
+        ,DATE(transit_time_report.creation_datetime) AS "creation_date" 
+        ,transit_time_report.legacy_shipper_id
+        ,shippers_enriched.shipper_name
+        ,vn_views.hubs_enriched.name AS "pickup_hub_name"
+        ,vn_views.hubs_enriched.region AS "pickup_region"
+        ,vn_views.hubs_enriched.short_name AS "pickup_province"
+        ,c2.working_day_cum - c1.working_day_cum AS "backlog_days"
+        ,c2.working_day*cast(date_format(transit_time_report.start_clock_datetime,'%H') as int)
+        + c1.working_day*(if(c1.date != c2.date,24,0) -cast(date_format(transit_time_report.creation_datetime,'%H') as int))
+        + 24*(c2.working_day_cum - c1.working_day_cum - if(c1.date != c2.date,c2.working_day,0)) AS "backlog_hours"	    
+    
+    FROM vn_views.transit_time_report
+    JOIN vn_views.order_milestones ON transit_time_report.order_id = order_milestones.order_id
+    JOIN vn_views.shippers_enriched ON transit_time_report.legacy_shipper_id = shippers_enriched.legacy_id
+        AND shippers_enriched.shipper_group = 'Lazada Master Account (ASC)'
+    JOIN vn_views.hubs_enriched ON transit_time_report.origin_hub_id = vn_views.hubs_enriched.id
+        JOIN vn_views.calendar c1 ON c1.date = date(transit_time_report.creation_datetime)
+    JOIN vn_views.calendar c2 ON c2.date = transit_time_report.start_clock_date
+    
+    WHERE TRUE
+    AND order_milestones.is_pickup_required = 1
+    AND transit_time_report.granular_status != 'CANCELLED'
+    AND {{creation_datetime}}
+    [[AND {{shipper_id}}]]
+    [[AND {{shipper_name}}]]
+    [[AND {{pickup_province}}]]
+),
+agg AS (
+    SELECT 
+        shipper_name
+        ,creation_date
+        ,avg(backlog_hours) AS "leadtime"
+		,count(order_id) AS "volume"
+        ,count_if(backlog_days <= 2) AS "backlog_2D"
+        ,count_if(backlog_days <= 3) AS "backlog_3D"
+        ,count_if(backlog_days <= 4) AS "backlog_4D"
+        ,count_if(backlog_days <= 5) AS "backlog_5D"
+        ,count_if(backlog_days <= 6) AS "backlog_6D"
+        ,count_if(backlog_days <= 7) AS "backlog_7D"
+        ,count_if(backlog_days <=14) AS "backlog_14D"
+
+        FROM raw1
+        
+        WHERE TRUE 
+        
+        GROUP BY 1,2
+    )
+SELECT
+    shipper_name
+    ,avg(leadtime) AS "leadtime"
+    ,SUM(volume) AS "total"
+    ,sum(backlog_2D) AS "backlog_2D"
+    ,sum(backlog_3D) AS "backlog_3D"
+    ,sum(backlog_4D) AS "backlog_4D"
+    ,sum(backlog_5D) AS "backlog_5D"
+    ,sum(backlog_6D) AS "backlog_6D"
+    ,sum(backlog_7D) AS "backlog_7D"
+    ,sum(backlog_14D) AS "backlog_14D"
+    ,sum(backlog_2D)*1.000/sum(volume)*1.000 AS "aging_2D"
+    ,sum(backlog_3D)*1.000/sum(volume)*1.000 AS "aging_3D"
+    ,sum(backlog_4D)*1.000/sum(volume)*1.000 AS "aging_4D"
+    ,sum(backlog_5D)*1.000/sum(volume)*1.000 AS "aging_5D"
+    ,sum(backlog_6D)*1.000/sum(volume)*1.000 AS "aging_6D"
+    ,sum(backlog_7D)*1.000/sum(volume)*1.000 AS "aging_7D"
+    ,sum(backlog_14D)*1.000/sum(volume)*1.000 AS "aging_14D"
+    
+FROM agg
+GROUP BY
+    rollup(shipper_name)
+ORDER BY total DESC
